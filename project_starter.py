@@ -357,7 +357,7 @@ def get_stock_level(item_name: str, as_of_date: Union[str, datetime]) -> pd.Data
                 ELSE 0
             END), 0) AS current_stock
         FROM transactions
-        WHERE item_name = :item_name
+        WHERE LOWER(item_name) = LOWER(:item_name)
         AND transaction_date <= :as_of_date
     """
 
@@ -1654,7 +1654,7 @@ def run_test_scenarios():
         quote_requests_sample = pd.read_csv("quote_requests_sample.csv")
         #print(quote_requests_sample["request_date"])
         #print(repr(quote_requests_sample.iloc[0]["request_date"]))
-        quote_requests_sample = quote_requests_sample.head(1)
+        #quote_requests_sample = quote_requests_sample.head(1)
         quote_requests_sample["request_date"] = pd.to_datetime(
             quote_requests_sample["request_date"], errors="coerce"
         )
@@ -1681,7 +1681,7 @@ def run_test_scenarios():
     orchestrator = OrchestratorAgent(model)
 
     results = []
-    for idx, row in quote_requests_sample.head(1).iterrows():
+    for idx, row in quote_requests_sample.iterrows():
         request_date = row["request_date"].strftime("%Y-%m-%d")
 
         print(f"\n=== Request {idx+1} ===")
