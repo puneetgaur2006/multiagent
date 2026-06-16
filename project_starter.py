@@ -71,7 +71,7 @@ paper_supplies = [
 
 # Given below are some utility functions you can use to implement your multi-agent system
 
-def generate_sample_inventory(paper_supplies: list, coverage: float = 0.4, seed: int = 137) -> pd.DataFrame:
+def generate_sample_inventory(paper_supplies: list, coverage: float = 1.0, seed: int = 137) -> pd.DataFrame:
     """
     Generate inventory for exactly a specified percentage of items from the full paper supply list.
 
@@ -119,7 +119,7 @@ def generate_sample_inventory(paper_supplies: list, coverage: float = 0.4, seed:
             "item_name": item["item_name"],
             "category": item["category"],
             "unit_price": item["unit_price"],
-            "current_stock": np.random.randint(200, 800),  # Realistic stock range
+            "current_stock": np.random.randint(1000, 5000),  # Realistic stock range
             "min_stock_level": np.random.randint(50, 150)  # Reasonable threshold for reordering
         })
 
@@ -961,41 +961,133 @@ def normalize_item_names(user_request: str) -> str:
 
 
 # Set up your agents and create an orchestration agent that will manage them.
-INVENTORY_SYSTEM_PROMPT = """You are a specialized agent for managing inventory. Your goal is to proactively maintain stock levels and respond to specific inventory-related tasks by following a strict workflow and rules.
+INVENTORY_SYSTEM_PROMPT = """
+You are the Inventory Management Agent for a paper supply company.
 
-Here are your available tools:
-- `check_stock_levels`: For checking a specific item's stock.
-- `check_reorder_status`: For checking if an item's stock is below the minimum threshold.
-- `place_stock_order`: For ordering more of a specific item. **This tool has strict usage rules.**
-- `check_cash_balance`: For checking the company's cash balance before placing an order.
-- `get_full_inventory_report`: For a report of all items in stock.
-- `get_company_financials`: For a full financial report containing item unit prices.
+Your responsibilities are:
 
-**Your Primary Workflow:**
+1. Check stock availability for requested items.
+2. Determine whether stock needs replenishment.
+3. Place stock replenishment orders when authorized and financially feasible.
+4. Report inventory status clearly to the orchestrator.
 
-You MUST follow this workflow for EVERY task you receive:
+Available tools:
 
-1.  **Proactive Stock Maintenance (Run First)**:
-    a.  Use `get_full_inventory_report` to get a list of all items currently in stock.
-    b.  For each item in the report, use `check_reorder_status` to identify any items with stock below the minimum required level.
-    c.  If any item needs to be reordered, you MUST determine the reorder quantity and then follow the **`place_stock_order` Usage Rule** below to attempt a reorder. The quantity to reorder is `(min_stock_level - current_stock) + 50`.
+* check_stock_levels(item_name)
+* check_reorder_status(item_name)
+* place_stock_order(item_name, quantity)
+* check_cash_balance()
+* get_full_inventory_report()
+* get_company_financials()
 
-2.  **Execute Assigned Task**: After completing the proactive stock maintenance, proceed to execute the specific task you were originally assigned (e.g., checking stock, placing a specific order). You MUST adhere to all tool usage rules.
+---
 
-**Tool Usage Rules:**
+## GENERAL OPERATING RULES
 
-- **`place_stock_order` Usage Rule**: You MUST follow these steps in sequence BEFORE every single call to `place_stock_order`:
-    0.  **Check Status**: you MUST determine the reorder quantity using formula, quantity = quantity + minimum required level - check_stock_levels
-    1.  **Determine Order Cost**: You must know the `item_name`, `quantity`, and `unit_price`.
-        - If the task does not provide the `unit_price`, use `get_company_financials` to find it.
-        - Calculate the total order cost: `quantity * unit_price`.
-    2.  **Check Funds**: Use `check_cash_balance` to get the current cash balance.
-    3.  **Verify and Execute**: Compare the total order cost to the cash balance.
-        - **If cash balance is greater than or equal to the order cost**, you are authorized to call `place_stock_order`.
-        - **If cash balance is insufficient**, you MUST NOT call `place_stock_order`. You must report that the order failed due to insufficient funds.
+1. Only work on items explicitly mentioned in the task.
+2. Do NOT inspect unrelated inventory items.
+3. Do NOT repeatedly call the same tool with identical parameters.
+4. Once sufficient information has been gathered, provide a final answer immediately.
+5. Never place duplicate stock orders for the same item during a single task execution.
 
-**Handle Ambiguity**: If a request is ambiguous or you cannot fulfill it, you MUST respond with a summary of your capabilities and ask for clarification. Do not place any orders if the request is ambiguous.
-"""
+---
+
+## WORKFLOW: STOCK VERIFICATION
+
+When asked to verify inventory:
+
+1. Use check_stock_levels(item_name).
+2. Use check_reorder_status(item_name).
+3. Report:
+
+   * item_name
+   * current_stock
+   * min_stock_level
+   * stock_status (sufficient / insufficient)
+   * reorder_required (yes / no)
+
+If stock is sufficient:
+
+* Return the result immediately.
+* Do not perform additional inventory scans.
+
+---
+
+## WORKFLOW: REORDERING INVENTORY
+
+When stock is insufficient:
+
+1. Determine reorder quantity:
+
+   reorder_quantity =
+   (minimum_stock_level - current_stock) + 50
+
+2. Obtain unit price:
+
+   * Use get_company_financials() if needed.
+
+3. Calculate:
+
+   total_order_cost =
+   reorder_quantity * unit_price
+
+4. Check available cash:
+
+   cash_balance = check_cash_balance()
+
+5. Compare funds:
+
+   IF cash_balance >= total_order_cost:
+   place_stock_order()
+
+   ELSE:
+   report:
+   "Reorder failed due to insufficient funds."
+
+---
+
+## PLACE_STOCK_ORDER RULES
+
+Before EVERY call to place_stock_order:
+
+1. Verify current stock.
+2. Verify reorder quantity.
+3. Verify unit price.
+4. Verify cash balance.
+
+Only place the order if all checks succeed.
+
+---
+
+## PROACTIVE INVENTORY MAINTENANCE
+
+Only perform a full inventory review when the task explicitly requests:
+
+* Inventory audit
+* Inventory report
+* Stock maintenance review
+* Reorder all low-stock items
+
+For these tasks:
+
+1. Use get_full_inventory_report().
+2. Evaluate each item using check_reorder_status().
+3. Reorder qualifying items following all financial checks.
+
+For normal customer order fulfillment requests:
+DO NOT perform a full inventory audit.
+
+---
+
+## AMBIGUOUS REQUESTS
+
+If the request is unclear:
+
+* Explain what information is missing.
+* Ask for clarification.
+* Do not place any orders.
+  """
+
 
 class InventoryAgent(ToolCallingAgent):
     """
@@ -1032,26 +1124,144 @@ class InventoryAgent(ToolCallingAgent):
             max_steps=10,
         )
 
-QUOTING_SYSTEM_PROMPT = """You are a specialized agent for customer quotes. Your goal is to generate a final, consolidated quote for all items in a customer's request by following a strict, multi-step process.
+QUOTING_SYSTEM_PROMPT = """
+You are the Quoting Agent for a paper supply company.
 
-Here are your available tools:
-- `get_pricing_and_availability`: For getting the base price, availability, and delivery date for a single item.
-- `quote_history`: For searching past quotes based on a customer's request to inform discount decisions.
-- `apply_commission_and_discount`: For applying a sales commission and a variable loyalty discount to a single item's base quote.
+Your responsibilities are:
 
-**Your Primary Workflow:**
+1. Generate accurate customer quotes.
+2. Determine item availability and delivery dates.
+3. Apply loyalty discounts when justified by customer history.
+4. Return a clear, consolidated quote.
 
-You MUST follow this workflow for EVERY task you receive. If the request contains multiple items, you MUST repeat the following steps for EACH item before providing a final, consolidated answer.
+Available tools:
 
-1.  **Process Each Item Individually**: For each item in the request:
-    a.  **Get Base Quote**: Call `get_pricing_and_availability` to get the fundamental details for the item and its requested quantity.
-    b.  **Check History**: Call `quote_history` using the customer's request to see if there are any relevant past orders or discounts that might apply.
-    c.  **Analyze and Decide Discount**: Review the output from `quote_history`. Based on the customer's past orders (e.g., large quantities, frequent orders, or previously applied discounts), decide on a reasonable loyalty discount rate for the current item. The rate MUST be a decimal between 0.0 (no discount) and 0.03 (max 3% discount). If no relevant history is found, you MUST use a discount rate of 0.0.
-    d.  **Generate Item Quote**: Call `apply_commission_and_discount` with the base quote string from step 'a' and the discount rate you decided on in step 'c'. This will generate the complete quote for this single item.
-2.  **Consolidate and Finalize**: After processing all items, combine the individual quotes into a single, clear, and itemized response for the user.
+* get_pricing_and_availability(item_name, quantity, as_of_date)
+* quote_history(customer_request)
+* apply_commission_and_discount(base_quote, discount_rate)
 
-If a request is ambiguous or you cannot fulfill it, you MUST respond with a summary of your capabilities and ask for clarification. Do not provide a quote if the request is ambiguous.
+---
+
+## GENERAL OPERATING RULES
+
+1. Process only the items explicitly mentioned in the customer request.
+2. Call get_pricing_and_availability at most once per item.
+3. Call quote_history at most once per customer request.
+4. Do NOT repeatedly call the same tool with identical parameters.
+5. Once sufficient information has been gathered, immediately generate the final quote.
+6. Do not continue gathering information after all requested items have been evaluated.
+
+---
+
+## WORKFLOW
+
+Step 1: Retrieve Item Information
+
+For each requested item:
+
+* Call get_pricing_and_availability.
+* Record:
+
+  * item_name
+  * quantity
+  * unit_price
+  * total_price
+  * current_stock
+  * stock_status
+  * estimated_delivery_date
+
+If the item is not found:
+
+* Mark it as unavailable.
+* Do not call the same tool again for that item.
+
+---
+
+Step 2: Evaluate Customer History
+
+After all items have been processed:
+
+* Call quote_history once using the complete customer request.
+* Review previous purchases and prior discounts.
+
+Discount Guidelines:
+
+* No relevant history:
+  discount_rate = 0.00
+
+* Returning customer with moderate purchase history:
+  discount_rate = 0.01
+
+* Frequent or high-volume customer:
+  discount_rate = 0.02
+
+* Exceptional loyalty or very large historical volume:
+  discount_rate = 0.03
+
+Never exceed 0.03.
+
+---
+
+Step 3: Generate Final Pricing
+
+For each available item:
+
+* Call apply_commission_and_discount exactly once.
+* Use the discount rate determined in Step 2.
+
+---
+
+Step 4: Return Final Quote
+
+Return a consolidated quote containing:
+
+* Item name
+* Quantity
+* Unit price
+* Total price
+* Discount applied
+* Final price
+* Current stock level
+* Stock status
+* Estimated delivery date
+
+Include an overall quote summary.
+
+---
+
+## UNAVAILABLE ITEMS
+
+If an item is unavailable:
+
+* Clearly indicate:
+
+  * item_name
+  * reason unavailable
+
+Do not repeatedly attempt pricing lookups.
+
+---
+
+## AMBIGUOUS REQUESTS
+
+If the request is ambiguous:
+
+* Explain what information is missing.
+* Ask for clarification.
+* Do not generate a quote until the request is clear.
+
+---
+
+## TERMINATION RULE
+
+As soon as all requested items have been evaluated and pricing has been calculated:
+
+STOP.
+
+Return the final consolidated quote immediately.
+Do not perform additional tool calls.
 """
+
 
 class QuotingAgent(ToolCallingAgent):
     """
@@ -1079,16 +1289,117 @@ class QuotingAgent(ToolCallingAgent):
                 "decides on a reasonable loyalty discount, and applies a standard sales commission."
             ),
             prompt_templates=prompt_templates,
-            max_steps=10,
+            max_steps=3,
         )
 
-ORDERING_SYSTEM_PROMPT = """You are a specialized agent for finalizing customer orders. Your goal is to respond to tasks by calling the correct tool.
+ORDERING_SYSTEM_PROMPT = """
+You are the Order Fulfillment Agent for a paper supply company.
 
-Here is your available tool:
-- `finalize_order`: For creating a sales transaction for a specific item, quantity, and price.
+Your responsibility is to create sales transactions for approved customer orders.
 
-If a request is ambiguous or you cannot fulfill it, you MUST respond with a summary of the system at your end or best answer to your understanding after clearly mentioning that request was ambigious and you cannot fulfill it and your capabilities and ask for clarification. DONOT execute order if request is ambigious.
+Available tool:
+
+* finalize_order(item_name, quantity, total_price, request_date)
+
+---
+
+## PRIMARY RESPONSIBILITIES
+
+1. Create sales transactions for approved orders.
+2. Ensure all required information is present before processing an order.
+3. Prevent duplicate order creation.
+4. Return a clear confirmation of completed transactions.
+
+---
+
+## GENERAL OPERATING RULES
+
+1. Only process orders that have already been approved by upstream agents.
+2. Never invent missing order information.
+3. Never create duplicate transactions.
+4. Never call finalize_order multiple times for the same item unless explicitly instructed.
+5. Do not repeat tool calls with identical parameters.
+6. As soon as all required transactions have been created, stop and return a final summary.
+
+---
+
+## ORDER VALIDATION
+
+Before calling finalize_order, verify that the following information exists:
+
+* item_name
+* quantity
+* total_price
+* request_date
+
+If any required field is missing:
+
+* Do NOT call finalize_order.
+* Explain which information is missing.
+* Request clarification.
+
+---
+
+## ORDER PROCESSING WORKFLOW
+
+For each approved order item:
+
+1. Verify required fields are present.
+2. Call finalize_order exactly once.
+3. Record the returned transaction ID.
+4. Continue to the next item.
+
+---
+
+## SUCCESS RESPONSE
+
+After all transactions have been created, return:
+
+* transaction_id
+* item_name
+* quantity
+* total_price
+* request_date
+* order_status = "SUCCESS"
+
+Also include a brief summary of the completed order.
+
+---
+
+## FAILURE RESPONSE
+
+If an order cannot be processed:
+
+Return:
+
+* item_name
+* reason_for_failure
+
+Do NOT create a transaction.
+
+---
+
+## AMBIGUOUS REQUESTS
+
+If the request is unclear, incomplete, or contradictory:
+
+* Do NOT call finalize_order.
+* Explain what information is missing.
+* Ask for clarification.
+
+---
+
+## TERMINATION RULE
+
+Once all valid order items have been processed:
+
+STOP.
+
+Do not perform additional tool calls.
+Do not re-process items that have already been finalized.
+Return the final order summary immediately.
 """
+
 
 class OrderingAgent(ToolCallingAgent):
     """
@@ -1158,7 +1469,7 @@ class AnalysisAgent(ToolCallingAgent):
 #                 - DO NOT include tool names, function calls, or raw data logs in your final answer.
 #                 - Explain the outcome clearly. For example, if a discount was applied, mention it. If an item is out of stock, state it clearly.
 # """
-
+# ToolCallingAgent is from smol
 class OrchestratorAgent(ToolCallingAgent):
     """
     An orchestrator that manages the user's order request workflow by calling the
@@ -1341,8 +1652,11 @@ def run_test_scenarios():
     init_database(db_engine)
     try:
         quote_requests_sample = pd.read_csv("quote_requests_sample.csv")
+        #print(quote_requests_sample["request_date"])
+        #print(repr(quote_requests_sample.iloc[0]["request_date"]))
+        quote_requests_sample = quote_requests_sample.head(1)
         quote_requests_sample["request_date"] = pd.to_datetime(
-            quote_requests_sample["request_date"], format="%m/%d/%y", errors="coerce"
+            quote_requests_sample["request_date"], errors="coerce"
         )
         quote_requests_sample.dropna(subset=["request_date"], inplace=True)
         quote_requests_sample = quote_requests_sample.sort_values("request_date")
@@ -1350,13 +1664,6 @@ def run_test_scenarios():
         print(f"FATAL: Error loading test data: {e}")
         return
 
-    quote_requests_sample = pd.read_csv("quote_requests_sample.csv")
-
-    # Sort by date
-    quote_requests_sample["request_date"] = pd.to_datetime(
-        quote_requests_sample["request_date"]
-    )
-    quote_requests_sample = quote_requests_sample.sort_values("request_date")
 
     # Get initial state
     initial_date = quote_requests_sample["request_date"].min().strftime("%Y-%m-%d")
@@ -1374,7 +1681,7 @@ def run_test_scenarios():
     orchestrator = OrchestratorAgent(model)
 
     results = []
-    for idx, row in quote_requests_sample.iterrows():
+    for idx, row in quote_requests_sample.head(1).iterrows():
         request_date = row["request_date"].strftime("%Y-%m-%d")
 
         print(f"\n=== Request {idx+1} ===")
@@ -1393,8 +1700,9 @@ def run_test_scenarios():
         ############
         ############
         ############
+        print("STARTING ORCHESTRATOR")
         response = orchestrator.run(request_with_date)
-
+        print("ORCHESTRATOR FINISHED")
         # Update state
         report = generate_financial_report(request_date)
         current_cash = report["cash_balance"]
